@@ -10,7 +10,7 @@ app = Flask(__name__)
 TZ = pytz.timezone('Europe/Samara')
 
 # Ссылка на твою группу (базовая)
-URL = "https://timeo.mveu.ru"
+URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%91"
 
 @app.route('/calendar.ics')
 def get_calendar():
