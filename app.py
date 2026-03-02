@@ -58,7 +58,7 @@ def get_calendar():
                         start_t, end_t = [t.strip() for t in time_text.split('-')]
                         
                         e = Event()
-                        e.name = subject
+                        e.name = f"{subject} ({room})" 
                         e.location = f"Ауд: {room}, {teacher}"
                         e.begin = TZ.localize(datetime.strptime(f"{current_date_str} {start_t}", "%d.%m.%Y %H:%M"))
                         e.end = TZ.localize(datetime.strptime(f"{current_date_str} {end_t}", "%d.%m.%Y %H:%M"))
