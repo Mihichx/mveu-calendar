@@ -4,3 +4,4 @@ beautifulsoup4
 ics
 pytz
 gunicorn
+tatsu==5.6.1
