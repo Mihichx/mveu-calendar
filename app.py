@@ -18,7 +18,7 @@ def get_calendar():
     cal = Calendar()
     
     # Собираем данные за прошлую, текущую и следующую неделю
-    for skip in [-1, 0, 1]:
+    for skip in [-1, 0, 1, 2]:
         week_url = f"{URL}&skip={skip}"
         try:
             response = requests.get(week_url, headers=headers, timeout=20)
