@@ -4,71 +4,73 @@ from ics import Calendar, Event
 from flask import Flask, Response
 from datetime import datetime
 import pytz
+import re
 
 app = Flask(__name__)
 TZ = pytz.timezone('Europe/Samara')
 
-SCHEDULE_URL = "https://timeo.mveu.ru"
+# Ссылка на твою группу (базовая)
+URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%91"
 
 @app.route('/calendar.ics')
 def get_calendar():
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(SCHEDULE_URL, headers=headers, timeout=15)
-        response.encoding = 'utf-8' # Явно ставим кодировку
-        soup = BeautifulSoup(response.text, 'html.parser')
-        cal = Calendar()
-        
-        # На сайте МВЕУ расписание обычно в таблице <table>
-        rows = soup.find_all('tr')
-        current_date = None
-        
-        for row in rows:
-            # 1. Ищем заголовок дня (обычно это <th> или <td> с датой)
-            # Дата на сайте выглядит как "02.03.2026, Понедельник"
-            date_cell = row.find(['th', 'td'], class_='date-column') or row.find('th')
-            if date_cell and '.' in date_cell.text:
-                text = date_cell.get_text(strip=True)
-                # Вытаскиваем только саму дату "02.03.2026"
-                current_date = text.split(',')[0].strip()
-                continue
-
-            # 2. Ищем строки с парами
-            cols = row.find_all('td')
-            # В таблице МВЕУ обычно: Время | Предмет | Преподаватель/Кабинет
-            if len(cols) >= 2 and current_date:
-                time_text = cols[0].get_text(strip=True) # "08:30-10:00" или "08:30 - 10:00"
-                
-                # Если в первой колонке нет тире, это не время, пропускаем
-                if '-' not in time_text:
-                    continue
-                
-                subject = cols[1].get_text(strip=True)
-                # Если есть третья колонка — там кабинет и препод
-                details = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-
-                try:
-                    # Чистим время от пробелов
-                    times = time_text.replace(' ', '').split('-')
-                    start_t = times[0]
-                    end_t = times[1]
-                    
-                    e = Event()
-                    e.name = subject
-                    e.location = details
-                    # Собираем дату и время в один объект
-                    e.begin = TZ.localize(datetime.strptime(f"{current_date} {start_t}", "%d.%m.%Y %H:%M"))
-                    e.end = TZ.localize(datetime.strptime(f"{current_date} {end_t}", "%d.%m.%Y %H:%M"))
-                    cal.events.add(e)
-                except Exception as ex:
-                    print(f"Ошибка парсинга строки: {ex}")
-                    continue
-                
-        return Response(str(cal), mimetype='text/calendar')
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    cal = Calendar()
     
-    except Exception as e:
-        return f"Ошибка сервера: {str(e)}", 500
+    # Собираем данные за прошлую, текущую и следующую неделю
+    for skip in [-1, 0, 1]:
+        week_url = f"{URL}&skip={skip}"
+        try:
+            response = requests.get(week_url, headers=headers, timeout=20)
+            response.encoding = 'utf-8'
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            table = soup.find('table', class_='crud')
+            if not table: continue
+
+            rows = table.find_all('tr')
+            current_date_str = None
+            year = datetime.now().year
+
+            for row in rows:
+                cells = row.find_all('td')
+                if not cells: continue 
+
+                # Определение даты (ячейка с rowspan)
+                if cells[0].has_attr('rowspan'):
+                    raw_date = cells[0].get_text(strip=True)
+                    match = re.search(r'(\d{2}\.\d{2})', raw_date)
+                    if match:
+                        current_date_str = f"{match.group(1)}.{year}"
+                    data_cells = cells[1:]
+                else:
+                    data_cells = cells
+
+                # Сбор данных о паре (индексы колонок согласно твоему коду страницы)
+                try:
+                    # Время - 1, Предмет - 2, Преподаватель - 4, Ауд - 5
+                    time_text = data_cells[1].get_text(strip=True).replace('—', '-').replace('–', '-')
+                    subject = data_cells[2].get_text(strip=True)
+                    teacher = data_cells[4].get_text(strip=True)
+                    room = data_cells[5].get_text(strip=True)
+
+                    if '-' in time_text and subject and current_date_str:
+                        start_t, end_t = [t.strip() for t in time_text.split('-')]
+                        
+                        e = Event()
+                        e.name = subject
+                        e.location = f"Ауд: {room}, {teacher}"
+                        e.begin = TZ.localize(datetime.strptime(f"{current_date_str} {start_t}", "%d.%m.%Y %H:%M"))
+                        e.end = TZ.localize(datetime.strptime(f"{current_date_str} {end_t}", "%d.%m.%Y %H:%M"))
+                        cal.events.add(e)
+                except: continue
+        except: continue
+                        
+    return Response(str(cal), mimetype='text/calendar')
 
 @app.route('/')
-def index():
-    return 'Сервер запущен. <a href="/calendar.ics">Скачать/Проверить .ics файл</a>'
+def home():
+    return 'Бот МВЕУ работает! <a href="/calendar.ics">Ссылка на твой календарь</a>'
+
+if __name__ == "__main__":
+    app.run()
