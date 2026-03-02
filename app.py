@@ -5,6 +5,7 @@ from flask import Flask, Response
 from datetime import datetime
 import pytz
 import re
+import os
 
 app = Flask(__name__)
 TZ = pytz.timezone('Europe/Samara')
@@ -66,4 +67,6 @@ def home():
     return 'Бот МВЕУ работает! <a href="/calendar.ics">Скачать календарь</a>'
 
 if __name__ == "__main__":
-    app.run()
+    # Render передает порт в переменной окружения PORT
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
