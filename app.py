@@ -70,13 +70,13 @@ def get_calendar():
     for date_str in sorted(events_by_date.keys(), key=lambda x: datetime.strptime(x, "%d.%m.%Y")):
         lessons = sorted(events_by_date[date_str], key=lambda x: x['start'])
         
+        # Время окончания ПРЕДЫДУЩЕЙ пары, на которую ставили уведомление
         last_alarm_end_time = None
 
         for lesson in lessons:
             room_l = lesson['room'].lower()
             subj_l = lesson['subject'].lower()
             
-            # Фильтры типов занятий
             is_offline = any(char.isdigit() for char in lesson['room']) or "спортзал" in room_l
             is_online = "вебинар" in room_l or "базовый" in subj_l or "авторизируйтесь" in room_l
             is_trash = "начальный" in subj_l
@@ -84,13 +84,14 @@ def get_calendar():
             trigger_minutes = None
 
             if not is_trash:
-                if is_offline:
-                    # Очные всегда за 1 час
-                    trigger_minutes = 60
-                elif is_online:
-                    # Вебинары за 10 минут, если нет "склейки"
-                    if last_alarm_end_time is None or (lesson['start'] - last_alarm_end_time) > timedelta(minutes=20):
-                        trigger_minutes = 10
+                # Проверяем, есть ли "окно" перед текущей парой
+                # Если парой ранее мы уже уведомляли, и перерыв маленький — молчим
+                has_break = last_alarm_end_time is None or (lesson['start'] - last_alarm_end_time) > timedelta(minutes=40)
+
+                if is_offline and has_break:
+                    trigger_minutes = 60 # Очные за час
+                elif is_online and has_break:
+                    trigger_minutes = 10 # Вебинары за 10 мин
 
             e = Event()
             e.add('summary', f"{lesson['subject']} ({lesson['room']})")
@@ -104,6 +105,10 @@ def get_calendar():
                 alarm.add('trigger', timedelta(minutes=-trigger_minutes))
                 alarm.add('description', f"Начало через {trigger_minutes} мин")
                 e.add_component(alarm)
+                # Обновляем время только если поставили звук
+                last_alarm_end_time = lesson['end']
+            elif last_alarm_end_time is not None and (lesson['start'] - last_alarm_end_time) <= timedelta(minutes=40):
+                # Если звук не ставили, но пара идет "паровозиком" — считаем её продолжением блока
                 last_alarm_end_time = lesson['end']
 
             cal.add_component(e)
