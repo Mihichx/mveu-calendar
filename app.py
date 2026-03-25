@@ -13,16 +13,17 @@ URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%9
 
 @app.route('/')
 def home():
-    return 'Бот МВЕУ работает! <a href="/calendar.ics">/calendar.ics</a>'
+    return 'Бот МВЕУ работает! Подключите: <a href="/calendar.ics">/calendar.ics</a>'
 
 @app.route('/calendar.ics')
 def get_calendar():
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     cal = Calendar()
     cal.add('prodid', '-//MVEU Schedule//')
     cal.add('version', '2.0')
     cal.add('x-wr-calname', 'Расписание МВЕУ')
     
+    # Множество для отслеживания дней, где МЫ УЖЕ поставили уведомление
     days_with_alarm = set()
 
     for skip in [-1, 0, 1, 2]:
@@ -42,22 +43,21 @@ def get_calendar():
                 cells = row.find_all('td')
                 if not cells: continue 
 
-                # Логика смещения из-за даты (rowspan)
+                # Обработка rowspan (дата)
                 if cells[0].has_attr('rowspan'):
                     raw_date = cells[0].get_text(strip=True)
                     match = re.search(r'(\d{2}\.\d{2})', raw_date)
                     if match:
                         current_date_str = f"{match.group(1)}.{year}"
-                    data = cells[1:] # Убираем ячейку с датой
+                    data_row = cells[1:]
                 else:
-                    data = cells
+                    data_row = cells
 
                 try:
-                    # ИНДЕКСЫ ПО СКРИНШОТУ: 1-время, 2-предмет, 5-ауд (после среза data)
-                    # Если в data[1] время, то индексы такие:
-                    time_text = data[1].get_text(strip=True).replace('—', '-').replace('–', '-')
-                    subject = data[2].get_text(strip=True)
-                    room = data[5].get_text(strip=True)
+                    # Индексы по HTML: 1-время, 2-предмет, 5-ауд (в data_row)
+                    time_text = data_row[1].get_text(strip=True).replace('—', '-').replace('–', '-')
+                    subject = data_row[2].get_text(strip=True)
+                    room = data_row[5].get_text(strip=True)
                     
                     if '-' in time_text and subject and current_date_str:
                         start_t, end_t = [t.strip() for t in time_text.split('-')]
@@ -70,25 +70,34 @@ def get_calendar():
                         e.add('dtend', dt_end)
                         e.add('location', room)
 
-                        room_l = room.lower()
                         subj_l = subject.lower()
+                        room_l = room.lower()
 
-                        # Ставим уведомление только на ПЕРВУЮ пару дня
+                        # --- ЛОГИКА УВЕДОМЛЕНИЙ ---
+                        
+                        # 1. Если это "Начальный" уровень - уведомления ЗАПРЕЩЕНЫ
+                        if "начальный" in subj_l:
+                            cal.add_component(e)
+                            continue
+
+                        # 2. Если в этот день МЫ еще не ставили уведомление на ВАЖНУЮ пару
                         if current_date_str not in days_with_alarm:
-                            alarm = Alarm()
-                            alarm.add('action', 'DISPLAY')
-                            
-                            # Очно (цифры в аудитории или Спортзал) -> 1 час
-                            if any(char.isdigit() for char in room) or "спортзал" in room_l:
-                                alarm.add('trigger', timedelta(hours=-1))
-                                alarm.add('description', f"Пара очно в {room}")
+                            is_offline = any(char.isdigit() for char in room) or "спортзал" in room_l
+                            is_online = "вебинар" in room_l or "базовый" in subj_l or "авторизируйтесь" in room_l
+
+                            if is_offline:
+                                alarm = Alarm()
+                                alarm.add('action', 'DISPLAY')
+                                alarm.add('trigger', timedelta(hours=-1)) # За 1 час для очных
+                                alarm.add('description', f"Пара очно: {room}")
                                 e.add_component(alarm)
                                 days_with_alarm.add(current_date_str)
                             
-                            # Онлайн (Вебинар или Код Будущего) -> 10 минут
-                            elif "вебинар" in room_l or "код будущего" in subj_l:
-                                alarm.add('trigger', timedelta(minutes=-10))
-                                alarm.add('description', "Скоро онлайн-занятие")
+                            elif is_online:
+                                alarm = Alarm()
+                                alarm.add('action', 'DISPLAY')
+                                alarm.add('trigger', timedelta(minutes=-15)) # За 15 минут для вебинаров
+                                alarm.add('description', "Скоро начало онлайн")
                                 e.add_component(alarm)
                                 days_with_alarm.add(current_date_str)
 
