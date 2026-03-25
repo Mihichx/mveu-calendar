@@ -9,12 +9,11 @@ import os
 
 app = Flask(__name__)
 TZ = pytz.timezone('Europe/Samara')
-# ОБЯЗАТЕЛЬНО используем полную ссылку с группой
 URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%91"
 
 @app.route('/')
 def home():
-    return 'Бот МВЕУ работает! Ссылка: <a href="/calendar.ics">/calendar.ics</a>'
+    return 'Бот МВЕУ работает! <a href="/calendar.ics">/calendar.ics</a>'
 
 @app.route('/calendar.ics')
 def get_calendar():
@@ -22,6 +21,7 @@ def get_calendar():
     cal = Calendar()
     cal.add('prodid', '-//MVEU Schedule//')
     cal.add('version', '2.0')
+    cal.add('x-wr-calname', 'Расписание МВЕУ')
     
     days_with_alarm = set()
 
@@ -42,19 +42,22 @@ def get_calendar():
                 cells = row.find_all('td')
                 if not cells: continue 
 
+                # Логика смещения из-за даты (rowspan)
                 if cells[0].has_attr('rowspan'):
                     raw_date = cells[0].get_text(strip=True)
                     match = re.search(r'(\d{2}\.\d{2})', raw_date)
                     if match:
                         current_date_str = f"{match.group(1)}.{year}"
-                    data_cells = cells[1:]
+                    data = cells[1:] # Убираем ячейку с датой
                 else:
-                    data_cells = cells
+                    data = cells
 
                 try:
-                    time_text = data_cells[1].get_text(strip=True).replace('—', '-').replace('–', '-')
-                    subject = data_cells[2].get_text(strip=True)
-                    room = data_cells[5].get_text(strip=True)
+                    # ИНДЕКСЫ ПО СКРИНШОТУ: 1-время, 2-предмет, 5-ауд (после среза data)
+                    # Если в data[1] время, то индексы такие:
+                    time_text = data[1].get_text(strip=True).replace('—', '-').replace('–', '-')
+                    subject = data[2].get_text(strip=True)
+                    room = data[5].get_text(strip=True)
                     
                     if '-' in time_text and subject and current_date_str:
                         start_t, end_t = [t.strip() for t in time_text.split('-')]
@@ -67,32 +70,31 @@ def get_calendar():
                         e.add('dtend', dt_end)
                         e.add('location', room)
 
-                        # Логика уведомлений
                         room_l = room.lower()
+                        subj_l = subject.lower()
+
+                        # Ставим уведомление только на ПЕРВУЮ пару дня
                         if current_date_str not in days_with_alarm:
                             alarm = Alarm()
                             alarm.add('action', 'DISPLAY')
                             
-                            # Если кабинет с цифрами или спортзал — за час
+                            # Очно (цифры в аудитории или Спортзал) -> 1 час
                             if any(char.isdigit() for char in room) or "спортзал" in room_l:
                                 alarm.add('trigger', timedelta(hours=-1))
-                                alarm.add('description', f"Пара в {room}")
+                                alarm.add('description', f"Пара очно в {room}")
                                 e.add_component(alarm)
                                 days_with_alarm.add(current_date_str)
-                            # Если вебинар — за 10 минут
-                            elif "вебинар" in room_l or "авторизируйтесь" in room_l:
+                            
+                            # Онлайн (Вебинар или Код Будущего) -> 10 минут
+                            elif "вебинар" in room_l or "код будущего" in subj_l:
                                 alarm.add('trigger', timedelta(minutes=-10))
-                                alarm.add('description', "Скоро вебинар")
+                                alarm.add('description', "Скоро онлайн-занятие")
                                 e.add_component(alarm)
                                 days_with_alarm.add(current_date_str)
 
                         cal.add_component(e)
-                except Exception as ex:
-                    print(f"Ошибка парсинга строки: {ex}")
-                    continue
-        except Exception as ex:
-            print(f"Ошибка запроса: {ex}")
-            continue
+                except: continue
+        except: continue
                         
     return Response(cal.to_ical(), mimetype='text/calendar')
 
