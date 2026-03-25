@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 import re
 import os
+from collections import defaultdict
 
 app = Flask(__name__)
 TZ = pytz.timezone('Europe/Samara')
@@ -13,18 +14,12 @@ URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%9
 
 @app.route('/')
 def home():
-    return 'Бот МВЕУ работает! Подключите: <a href="/calendar.ics">/calendar.ics</a>'
+    return 'Бот МВЕУ работает! <a href="/calendar.ics">/calendar.ics</a>'
 
-@app.route('/calendar.ics')
-def get_calendar():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    cal = Calendar()
-    cal.add('prodid', '-//MVEU Schedule//')
-    cal.add('version', '2.0')
-    cal.add('x-wr-calname', 'Расписание МВЕУ')
-    
-    # Множество для отслеживания дней, где МЫ УЖЕ поставили уведомление
-    days_with_alarm = set()
+def parse_lessons():
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    events_by_date = defaultdict(list)
+    year = datetime.now().year
 
     for skip in [-1, 0, 1, 2]:
         week_url = f"{URL}&skip={skip}"
@@ -35,76 +30,84 @@ def get_calendar():
             table = soup.find('table', class_='crud')
             if not table: continue
 
-            rows = table.find_all('tr')
             current_date_str = None
-            year = datetime.now().year
-
-            for row in rows:
+            for row in table.find_all('tr'):
                 cells = row.find_all('td')
                 if not cells: continue 
 
-                # Обработка rowspan (дата)
                 if cells[0].has_attr('rowspan'):
-                    raw_date = cells[0].get_text(strip=True)
-                    match = re.search(r'(\d{2}\.\d{2})', raw_date)
-                    if match:
-                        current_date_str = f"{match.group(1)}.{year}"
-                    data_row = cells[1:]
+                    match = re.search(r'(\d{2}\.\d{2})', cells[0].get_text(strip=True))
+                    if match: current_date_str = f"{match.group(1)}.{year}"
+                    data = cells[1:]
                 else:
-                    data_row = cells
+                    data = cells
 
                 try:
-                    # Индексы по HTML: 1-время, 2-предмет, 5-ауд (в data_row)
-                    time_text = data_row[1].get_text(strip=True).replace('—', '-').replace('–', '-')
-                    subject = data_row[2].get_text(strip=True)
-                    room = data_row[5].get_text(strip=True)
-                    
-                    if '-' in time_text and subject and current_date_str:
+                    time_text = data[1].get_text(strip=True).replace('—', '-').replace('–', '-')
+                    if '-' in time_text and current_date_str:
                         start_t, end_t = [t.strip() for t in time_text.split('-')]
                         dt_start = TZ.localize(datetime.strptime(f"{current_date_str} {start_t}", "%d.%m.%Y %H:%M"))
                         dt_end = TZ.localize(datetime.strptime(f"{current_date_str} {end_t}", "%d.%m.%Y %H:%M"))
                         
-                        e = Event()
-                        e.add('summary', f"{subject} ({room})")
-                        e.add('dtstart', dt_start)
-                        e.add('dtend', dt_end)
-                        e.add('location', room)
-
-                        subj_l = subject.lower()
-                        room_l = room.lower()
-
-                        # --- ЛОГИКА УВЕДОМЛЕНИЙ ---
-                        
-                        # 1. Если это "Начальный" уровень - уведомления ЗАПРЕЩЕНЫ
-                        if "начальный" in subj_l:
-                            cal.add_component(e)
-                            continue
-
-                        # 2. Если в этот день МЫ еще не ставили уведомление на ВАЖНУЮ пару
-                        if current_date_str not in days_with_alarm:
-                            is_offline = any(char.isdigit() for char in room) or "спортзал" in room_l
-                            is_online = "вебинар" in room_l or "базовый" in subj_l or "авторизируйтесь" in room_l
-
-                            if is_offline:
-                                alarm = Alarm()
-                                alarm.add('action', 'DISPLAY')
-                                alarm.add('trigger', timedelta(hours=-1)) # За 1 час для очных
-                                alarm.add('description', f"Пара очно: {room}")
-                                e.add_component(alarm)
-                                days_with_alarm.add(current_date_str)
-                            
-                            elif is_online:
-                                alarm = Alarm()
-                                alarm.add('action', 'DISPLAY')
-                                alarm.add('trigger', timedelta(minutes=-15)) # За 15 минут для вебинаров
-                                alarm.add('description', "Скоро начало онлайн")
-                                e.add_component(alarm)
-                                days_with_alarm.add(current_date_str)
-
-                        cal.add_component(e)
+                        events_by_date[current_date_str].append({
+                            'subject': data[2].get_text(strip=True),
+                            'room': data[5].get_text(strip=True),
+                            'start': dt_start,
+                            'end': dt_end
+                        })
                 except: continue
         except: continue
-                        
+    return events_by_date
+
+@app.route('/calendar.ics')
+def get_calendar():
+    events_by_date = parse_lessons()
+    cal = Calendar()
+    cal.add('prodid', '-//MVEU Schedule//')
+    cal.add('version', '2.0')
+    cal.add('x-wr-calname', 'Расписание МВЕУ')
+
+    for date_str in sorted(events_by_date.keys(), key=lambda x: datetime.strptime(x, "%d.%m.%Y")):
+        lessons = sorted(events_by_date[date_str], key=lambda x: x['start'])
+        
+        last_alarm_end_time = None
+
+        for lesson in lessons:
+            room_l = lesson['room'].lower()
+            subj_l = lesson['subject'].lower()
+            
+            # Фильтры типов занятий
+            is_offline = any(char.isdigit() for char in lesson['room']) or "спортзал" in room_l
+            is_online = "вебинар" in room_l or "базовый" in subj_l or "авторизируйтесь" in room_l
+            is_trash = "начальный" in subj_l
+
+            trigger_minutes = None
+
+            if not is_trash:
+                if is_offline:
+                    # Очные всегда за 1 час
+                    trigger_minutes = 60
+                elif is_online:
+                    # Вебинары за 10 минут, если нет "склейки"
+                    if last_alarm_end_time is None or (lesson['start'] - last_alarm_end_time) > timedelta(minutes=20):
+                        trigger_minutes = 10
+
+            e = Event()
+            e.add('summary', f"{lesson['subject']} ({lesson['room']})")
+            e.add('dtstart', lesson['start'])
+            e.add('dtend', lesson['end'])
+            e.add('location', lesson['room'])
+
+            if trigger_minutes:
+                alarm = Alarm()
+                alarm.add('action', 'DISPLAY')
+                alarm.add('trigger', timedelta(minutes=-trigger_minutes))
+                alarm.add('description', f"Начало через {trigger_minutes} мин")
+                e.add_component(alarm)
+                last_alarm_end_time = lesson['end']
+
+            cal.add_component(e)
+
     return Response(cal.to_ical(), mimetype='text/calendar')
 
 if __name__ == "__main__":
