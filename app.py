@@ -14,7 +14,7 @@ URL = "https://timeo.mveu.ru/schedule/table?group=%D0%94%D0%98%D0%A1-242/21%D0%9
 
 @app.route('/')
 def home():
-    return 'Бот МВЕУ работает! <a href="/calendar.ics">/calendar.ics</a>'
+    return 'Бот МВЕУ работает! Добавьте в Google Календарь по ссылке: <a href="/calendar.ics">/calendar.ics</a>'
 
 def parse_lessons():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -35,23 +35,23 @@ def parse_lessons():
                 cells = row.find_all('td')
                 if not cells: continue 
 
-                if cells[0].has_attr('rowspan'):
-                    match = re.search(r'(\d{2}\.\d{2})', cells[0].get_text(strip=True))
+                if cells.has_attr('rowspan'):
+                    match = re.search(r'(\d{2}\.\d{2})', cells.get_text(strip=True))
                     if match: current_date_str = f"{match.group(1)}.{year}"
                     data = cells[1:]
                 else:
                     data = cells
 
                 try:
-                    time_text = data[1].get_text(strip=True).replace('—', '-').replace('–', '-')
+                    time_text = data.get_text(strip=True).replace('—', '-').replace('–', '-')
                     if '-' in time_text and current_date_str:
                         start_t, end_t = [t.strip() for t in time_text.split('-')]
                         dt_start = TZ.localize(datetime.strptime(f"{current_date_str} {start_t}", "%d.%m.%Y %H:%M"))
                         dt_end = TZ.localize(datetime.strptime(f"{current_date_str} {end_t}", "%d.%m.%Y %H:%M"))
                         
                         events_by_date[current_date_str].append({
-                            'subject': data[2].get_text(strip=True),
-                            'room': data[5].get_text(strip=True),
+                            'subject': data.get_text(strip=True),
+                            'room': data.get_text(strip=True),
                             'start': dt_start,
                             'end': dt_end
                         })
@@ -63,14 +63,17 @@ def parse_lessons():
 def get_calendar():
     events_by_date = parse_lessons()
     cal = Calendar()
-    cal.add('prodid', '-//MVEU Schedule//')
+    
+    # КРИТИЧЕСКИЕ ЗАГОЛОВКИ ДЛЯ GOOGLE
+    cal.add('prodid', '-//MVEU Schedule Bot//')
     cal.add('version', '2.0')
+    cal.add('method', 'PUBLISH') # Говорит серверу, что это официальная публикация
     cal.add('x-wr-calname', 'Расписание МВЕУ')
+    cal.add('x-wr-timezone', 'Europe/Samara')
+    cal.add('x-wr-caldesc', 'Автоматическое расписание с уведомлениями')
 
     for date_str in sorted(events_by_date.keys(), key=lambda x: datetime.strptime(x, "%d.%m.%Y")):
         lessons = sorted(events_by_date[date_str], key=lambda x: x['start'])
-        
-        # Время окончания ПРЕДЫДУЩЕЙ пары, на которую ставили уведомление
         last_alarm_end_time = None
 
         for lesson in lessons:
@@ -82,33 +85,32 @@ def get_calendar():
             is_trash = "начальный" in subj_l
 
             trigger_minutes = None
-
             if not is_trash:
-                # Проверяем, есть ли "окно" перед текущей парой
-                # Если парой ранее мы уже уведомляли, и перерыв маленький — молчим
                 has_break = last_alarm_end_time is None or (lesson['start'] - last_alarm_end_time) > timedelta(minutes=40)
-
                 if is_offline and has_break:
-                    trigger_minutes = 60 # Очные за час
+                    trigger_minutes = 60
                 elif is_online and has_break:
-                    trigger_minutes = 10 # Вебинары за 10 мин
+                    trigger_minutes = 10
 
             e = Event()
             e.add('summary', f"{lesson['subject']} ({lesson['room']})")
             e.add('dtstart', lesson['start'])
             e.add('dtend', lesson['end'])
             e.add('location', lesson['room'])
+            # Уникальный ID события, чтобы Google не путался при обновлениях
+            e.add('uid', f"{lesson['start'].strftime('%Y%m%dT%H%M%S')}@mveu_bot")
 
             if trigger_minutes:
                 alarm = Alarm()
                 alarm.add('action', 'DISPLAY')
+                # Отрицательный интервал (за X минут ДО начала)
                 alarm.add('trigger', timedelta(minutes=-trigger_minutes))
-                alarm.add('description', f"Начало через {trigger_minutes} мин")
+                alarm.add('description', f"Напоминание за {trigger_minutes} мин")
+                # Добавляем повтор для "надежности" (некоторые клиенты требуют это)
+                alarm.add('repeat', 0) 
                 e.add_component(alarm)
-                # Обновляем время только если поставили звук
                 last_alarm_end_time = lesson['end']
             elif last_alarm_end_time is not None and (lesson['start'] - last_alarm_end_time) <= timedelta(minutes=40):
-                # Если звук не ставили, но пара идет "паровозиком" — считаем её продолжением блока
                 last_alarm_end_time = lesson['end']
 
             cal.add_component(e)
